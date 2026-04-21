@@ -1,28 +1,28 @@
 # Event Handling in Minecraft 26.1+ (Fabric)
 
-Fabric provides a wide range of events to hook into game logic, ranging from basic lifecycle hooks to advanced networking filters.
+Fabric provides a wide range of events to hook into game logic, ranging from basic lifecycle hooks to advanced networking and interaction filters.
 
 ## 1. Server Lifecycle Events
 Registered via `net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents`.
 
 ### Basic Lifecycle
 ```java
-ServerLifecycleEvents.SERVER_STARTED.register(server -> { /* Initial setup */ });
-ServerLifecycleEvents.SERVER_STOPPING.register(server -> { /* Cleanup */ });
+ServerLifecycleEvents.SERVER_STARTED.register(server -> { /* After server has loaded world */ });
+ServerLifecycleEvents.SERVER_STOPPING.register(server -> { /* Before server starts shutting down */ });
+ServerLifecycleEvents.SERVER_STOPPED.register(server -> { /* After server has fully stopped */ });
 ```
 
 ### World Save Hooks
-Useful for auto-saves or manual `/save-all` triggers.
 ```java
 ServerLifecycleEvents.AFTER_SAVE.register((server, flush, force) -> {
-    // Logic after world data has been written to disk
+    // Logic after world data (and player data) has been written to disk
 });
 ```
 
-## 2. Player Connection Events (Play Phase)
+## 2. Player Connection Events
 Registered via `net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents`.
 
-### Join & Disconnect
+### Play Phase
 ```java
 ServerPlayConnectionEvents.JOIN.register((handler, sender, server) -> {
     ServerPlayer player = handler.getPlayer();
@@ -33,57 +33,75 @@ ServerPlayConnectionEvents.DISCONNECT.register((handler, server) -> {
 });
 ```
 
-## 3. Login & Authentication Events (Early Phase)
-Registered via `net.fabricmc.fabric.api.networking.v1.ServerLoginConnectionEvents`. These are critical for mods that perform authentication, data pre-fetching, or early-stage player blocking.
+### Early Phase (Login & Config)
+Registered via `ServerLoginConnectionEvents` and `ServerConfigurationConnectionEvents`.
+- `INIT`: Early login rejection.
+- `QUERY_START`: Async data pre-fetching (use `synchronizer.waitFor(future)`).
+- `DISCONNECT`: Cleanup if connection lost before "Play" phase.
 
-### Early Initialization
+## 3. World Interaction Events
+
+### Item & Block Interaction
+Registered via `net.fabricmc.fabric.api.event.player.UseItemCallback` and `UseBlockCallback`.
 ```java
-ServerLoginConnectionEvents.INIT.register((handler, server) -> {
-    if (/* cluster offline */) {
-        handler.disconnect(Component.literal("Service Unavailable"));
-    }
+UseItemCallback.EVENT.register((player, world, hand) -> {
+    // Logic when a player right-clicks with an item
+    return TypedActionResult.pass(player.getItemInHand(hand));
+});
+
+UseBlockCallback.EVENT.register((player, world, hand, hitResult) -> {
+    // Logic when a player right-clicks a block
+    return ActionResult.PASS;
 });
 ```
 
-### Async Data Fetching (`QUERY_START`)
-Allows you to pause the login process while performing asynchronous tasks (like fetching data from a database).
+### Block Breaking
+Registered via `net.fabricmc.fabric.api.event.player.PlayerBlockBreakEvents`.
 ```java
-ServerLoginConnectionEvents.QUERY_START.register((handler, server, sender, synchronizer) -> {
-    CompletableFuture<Void> future = CompletableFuture.runAsync(() -> {
-        // Fetch data...
-    });
-    // Tell the server to wait for this future before continuing
-    synchronizer.waitFor(future);
+PlayerBlockBreakEvents.BEFORE.register((world, player, pos, state, blockEntity) -> {
+    // Return false to cancel block breaking
+    return true;
 });
 ```
 
-### Login Disconnect
-Handles cases where a player’s connection is lost *before* they fully join the game world.
+## 4. Player Gameplay Events
+Registered via `net.fabricmc.fabric.api.entity.event.v1.ServerPlayerEvents`.
+
+### Respawn
 ```java
-ServerLoginConnectionEvents.DISCONNECT.register((handler, server) -> {
-    // Release early locks or clean up pre-fetched memory
+ServerPlayerEvents.AFTER_RESPAWN.register((oldPlayer, newPlayer, alive) -> {
+    // Sync data or update state for the new player instance
 });
 ```
 
-## 4. Configuration Phase Events
-Registered via `net.fabricmc.fabric.api.networking.v1.ServerConfigurationConnectionEvents`. This phase occurs between Login and Play.
-
-```java
-ServerConfigurationConnectionEvents.DISCONNECT.register((handler, server) -> {
-    // Final cleanup if they drop during the loading screen
-});
-```
-
-## 5. Messaging & Chat
+## 5. Messaging & Chat Filters
 Registered via `net.fabricmc.fabric.api.message.v1.ServerMessageEvents`.
 
 ```java
 ServerMessageEvents.CHAT_MESSAGE.register((message, sender, params) -> {
-    String chatText = message.signedContent();
+    // Logic for received chat messages
+});
+
+ServerMessageEvents.ALLOW_CHAT_MESSAGE.register((message, sender, params) -> {
+    // Return false to block the message from being sent
+    return true;
+});
+```
+
+## 6. Tick Events
+Registered via `net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents`.
+
+```java
+ServerTickEvents.START_SERVER_TICK.register(server -> {
+    // Logic at the beginning of every tick
+});
+
+ServerTickEvents.END_SERVER_TICK.register(server -> {
+    // Logic at the end of every tick
 });
 ```
 
 ## Best Practices
-1.  **Thread Safety**: Events like `QUERY_START` often run logic asynchronously. Use `server.execute(() -> { ... })` if you need to run code back on the main server thread.
-2.  **Synchronizer Usage**: Always use `synchronizer.waitFor()` for async login tasks to prevent the player from joining before their data is ready.
-3.  **Graceful Disconnects**: When disconnecting players in early phases (INIT/QUERY), provide clear, localized components as reasons.
+1.  **Return Values**: Interaction events (like `UseItemCallback`) often require a specific return type (`ActionResult` or `TypedActionResult`). Ensure you return `.PASS` unless you are explicitly handling/canceling the action.
+2.  **Thread Safety**: For async networking (`QUERY_START`), use `server.execute()` to return to the main thread for game logic.
+3.  **Lightweight Ticks**: Tick events run 20 times per second. Minimize logic here or use a modulo check (`server.getTickCount() % 20 == 0`) to run tasks periodically.
